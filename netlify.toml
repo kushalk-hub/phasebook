@@ -1,0 +1,43 @@
+# Netlify Configuration for Phasebook Full-Stack Application
+
+[build]
+  publish = "dist"
+  command = "npm run build"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["pg"]
+
+# Route all /api/* requests to the Netlify Serverless Function wrapper
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+# Explicit redirect for legacy root /health/database endpoint
+[[redirects]]
+  from = "/health/database"
+  to = "/.netlify/functions/api/health/database"
+  status = 200
+
+# Prevent direct static downloading of Node container entrypoint bundle
+[[redirects]]
+  from = "/server.cjs*"
+  to = "/index.html"
+  status = 404
+
+# SPA Client-Side Routing: Route all page requests to index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "SAMEORIGIN"
