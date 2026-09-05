@@ -508,6 +508,68 @@ export async function getNeonProjectMetadata(): Promise<{
 }
 
 // -------------------------------------------------------------
+// Schema Introspection & Adaptive Column Resolution
+// -------------------------------------------------------------
+let cachedTableColumns: Record<string, Set<string>> | null = null;
+
+async function getTableColumns(client: pg.PoolClient): Promise<Record<string, Set<string>>> {
+  if (cachedTableColumns) return cachedTableColumns;
+  try {
+    const res = await client.query(`
+      SELECT table_name, column_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' AND table_name IN ('posts', 'incidents', 'incident_events', 'comments');
+    `);
+    const cols: Record<string, Set<string>> = {
+      posts: new Set(),
+      incidents: new Set(),
+      incident_events: new Set(),
+      comments: new Set(),
+    };
+    for (const r of res.rows) {
+      if (!cols[r.table_name]) cols[r.table_name] = new Set();
+      cols[r.table_name].add(r.column_name);
+    }
+    cachedTableColumns = cols;
+    return cols;
+  } catch (err) {
+    console.warn('[Neon Database] Could not query information_schema.columns, using default schema fallback:', err);
+    return {
+      posts: new Set(['id', 'user_id', 'content', 'image', 'likes_count', 'shares_count', 'created_at']),
+      incidents: new Set(['id', 'title', 'service', 'severity', 'status', 'failure_type', 'details', 'started_at', 'resolved_at']),
+      incident_events: new Set(['id', 'incident_id', 'event_type', 'description', 'actor', 'created_at']),
+      comments: new Set(['id', 'post_id', 'user_id', 'text', 'likes_count', 'created_at']),
+    };
+  }
+}
+
+function buildIncidentSelectCols(cols: Set<string>): string {
+  const depCol = cols.has('deployment_id') ? 'deployment_id' : 'NULL::integer as deployment_id';
+  const causeCol = cols.has('root_cause') ? 'root_cause' : 'NULL::text as root_cause';
+  const failCol = cols.has('failure_type') ? 'failure_type' : 'NULL::text as failure_type';
+  const detCol = cols.has('details') ? 'details' : 'NULL::text as details';
+
+  return `id, title, service, severity, status, ${depCol}, ${causeCol}, ${failCol}, ${detCol}, started_at, resolved_at`;
+}
+
+function mapIncidentRow(r: any): IncidentRecord {
+  const cause = r.root_cause || r.details || r.failure_type || null;
+  return {
+    id: r.id,
+    title: r.title,
+    service: r.service,
+    severity: r.severity,
+    status: r.status,
+    deployment_id: r.deployment_id !== null && r.deployment_id !== undefined ? Number(r.deployment_id) : null,
+    root_cause: cause,
+    failure_type: r.failure_type || null,
+    details: r.details || cause,
+    started_at: r.started_at ? new Date(r.started_at).toISOString() : new Date().toISOString(),
+    resolved_at: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
+  };
+}
+
+// -------------------------------------------------------------
 // Social Network Application Data Operations (Neon-Backed)
 // -------------------------------------------------------------
 
@@ -538,14 +600,37 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
         ? Number(CURRENT_USER.id)
         : null;
 
-      // 1. Fetch Posts with Author profile info matching Neon schema (image_url, like_count, comment_count)
+      const cols = await getTableColumns(client);
+      const postsCols = cols.posts;
+      const commentsCols = cols.comments;
+
+      // Adaptively select image column (image_url or image)
+      const imgCol = postsCols.has('image_url')
+        ? 'p.image_url'
+        : postsCols.has('image')
+        ? 'p.image as image_url'
+        : 'NULL::text as image_url';
+
+      // Adaptively select likes column (like_count or likes_count)
+      const likesCol = postsCols.has('like_count')
+        ? 'p.like_count'
+        : postsCols.has('likes_count')
+        ? 'p.likes_count as like_count'
+        : '0 as like_count';
+
+      // Adaptively select comments count (comment_count or computed)
+      const commentsCol = postsCols.has('comment_count')
+        ? 'p.comment_count'
+        : '0 as comment_count';
+
+      // 1. Fetch Posts with Author profile info matching either Neon schema
       const postsRes = await client.query(`
         SELECT
           p.id,
           p.content,
-          p.image_url,
-          p.like_count,
-          p.comment_count,
+          ${imgCol},
+          ${likesCol},
+          ${commentsCol},
           p.created_at,
           u.id as author_id,
           COALESCE(pr.display_name, u.username, 'Phasebook User') as author_name,
@@ -554,21 +639,26 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
           true as author_verified,
           u.role as author_role,
           CASE WHEN $1::integer IS NOT NULL THEN
-            EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = $1::integer)
+            EXISTS(SELECT 1 FROM likes l WHERE l.post_id::text = p.id::text AND l.user_id::text = $1::text)
           ELSE false END as user_liked
         FROM posts p
-        LEFT JOIN users u ON p.user_id = u.id
-        LEFT JOIN profiles pr ON u.id = pr.user_id
+        LEFT JOIN users u ON p.user_id::text = u.id::text
+        LEFT JOIN profiles pr ON u.id::text = pr.user_id::text
         ORDER BY p.created_at DESC
         LIMIT 50;
       `, [currentUserId]);
 
-      // 2. Fetch Comments for these posts matching Neon schema (content, user_id)
+      // Adaptively select comment text column (content or text)
+      const commentTextCol = commentsCols.has('content')
+        ? 'c.content as text'
+        : 'c.text as text';
+
+      // 2. Fetch Comments for these posts
       const commentsRes = await client.query(`
         SELECT
           c.id,
           c.post_id,
-          c.content as text,
+          ${commentTextCol},
           0 as likes_count,
           c.created_at,
           u.id as author_id,
@@ -576,8 +666,8 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
           u.username as author_username,
           COALESCE(pr.avatar_url, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar
         FROM comments c
-        LEFT JOIN users u ON c.user_id = u.id
-        LEFT JOIN profiles pr ON u.id = pr.user_id
+        LEFT JOIN users u ON c.user_id::text = u.id::text
+        LEFT JOIN profiles pr ON u.id::text = pr.user_id::text
         ORDER BY c.created_at ASC;
       `);
 
@@ -647,25 +737,82 @@ export async function dbCreatePost(content: string, image?: string): Promise<Pha
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
-      const userId = typeof CURRENT_USER.id === 'number' || /^\d+$/.test(String(CURRENT_USER.id))
-        ? Number(CURRENT_USER.id)
-        : 1;
+      const cols = await getTableColumns(client);
+      const postsCols = cols.posts;
 
-      // Insert post into Neon matching posts schema
+      const insCols: string[] = ['content'];
+      const insVals: any[] = [content.trim()];
+      const valPlaceholders: string[] = ['$1'];
+      let paramIdx = 2;
+
+      // Handle user_id
+      if (postsCols.has('user_id')) {
+        insCols.push('user_id');
+        const userId = typeof CURRENT_USER.id === 'number' || /^\d+$/.test(String(CURRENT_USER.id))
+          ? Number(CURRENT_USER.id)
+          : CURRENT_USER.id;
+        insVals.push(userId);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (image) {
+        if (postsCols.has('image_url')) {
+          insCols.push('image_url');
+          insVals.push(image);
+          valPlaceholders.push(`$${paramIdx++}`);
+        } else if (postsCols.has('image')) {
+          insCols.push('image');
+          insVals.push(image);
+          valPlaceholders.push(`$${paramIdx++}`);
+        }
+      }
+
+      if (postsCols.has('like_count')) {
+        insCols.push('like_count');
+        insVals.push(0);
+        valPlaceholders.push(`$${paramIdx++}`);
+      } else if (postsCols.has('likes_count')) {
+        insCols.push('likes_count');
+        insVals.push(0);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (postsCols.has('comment_count')) {
+        insCols.push('comment_count');
+        insVals.push(0);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+      if (postsCols.has('shares_count')) {
+        insCols.push('shares_count');
+        insVals.push(0);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (postsCols.has('created_at')) {
+        insCols.push('created_at');
+        valPlaceholders.push('NOW()');
+      }
+
+      if (postsCols.has('updated_at')) {
+        insCols.push('updated_at');
+        valPlaceholders.push('NOW()');
+      }
+
       const res = await client.query(`
-        INSERT INTO posts (user_id, content, image_url, like_count, comment_count, created_at, updated_at)
-        VALUES ($1, $2, $3, 0, 0, NOW(), NOW())
+        INSERT INTO posts (${insCols.join(', ')})
+        VALUES (${valPlaceholders.join(', ')})
         RETURNING *;
-      `, [userId, content.trim(), image || null]);
+      `, insVals);
 
       const inserted = res.rows[0];
+      const finalImage = inserted.image_url || inserted.image || image || undefined;
       return {
         id: String(inserted.id),
         author: CURRENT_USER,
         timestamp: 'Just now',
         content: inserted.content,
-        image: inserted.image_url || undefined,
-        imageUrl: inserted.image_url || undefined,
+        image: finalImage,
+        imageUrl: finalImage,
         likes: 0,
         userLiked: false,
         shares: 0,
@@ -713,70 +860,42 @@ export async function dbLikePost(postId: string): Promise<PhasebookPost> {
         ? Number(CURRENT_USER.id)
         : 1;
 
+      const cols = await getTableColumns(client);
+      const postsCols = cols.posts;
+      const likeColName = postsCols.has('like_count') ? 'like_count' : 'likes_count';
+
       // Check if like exists
       const existingLike = await client.query(
-        'SELECT 1 FROM likes WHERE post_id = $1 AND user_id = $2;',
-        [numericPostId, userId]
+        'SELECT 1 FROM likes WHERE post_id::text = $1::text AND user_id::text = $2::text;',
+        [postId, String(CURRENT_USER.id)]
       );
 
       let userLiked = false;
       if (existingLike.rowCount && existingLike.rowCount > 0) {
         // Unlike
-        await client.query('DELETE FROM likes WHERE post_id = $1 AND user_id = $2;', [numericPostId, userId]);
-        await client.query('UPDATE posts SET like_count = GREATEST(0, like_count - 1) WHERE id = $1;', [numericPostId]);
+        await client.query('DELETE FROM likes WHERE post_id::text = $1::text AND user_id::text = $2::text;', [postId, String(CURRENT_USER.id)]);
+        if (postsCols.has(likeColName)) {
+          await client.query(`UPDATE posts SET ${likeColName} = GREATEST(0, ${likeColName} - 1) WHERE id::text = $1::text;`, [postId]);
+        }
         userLiked = false;
       } else {
         // Like
-        await client.query('INSERT INTO likes (post_id, user_id, created_at) VALUES ($1, $2, NOW());', [numericPostId, userId]);
-        await client.query('UPDATE posts SET like_count = like_count + 1 WHERE id = $1;', [numericPostId]);
+        await client.query('INSERT INTO likes (post_id, user_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING;', [numericPostId || postId, userId]);
+        if (postsCols.has(likeColName)) {
+          await client.query(`UPDATE posts SET ${likeColName} = ${likeColName} + 1 WHERE id::text = $1::text;`, [postId]);
+        }
         userLiked = true;
       }
 
       await client.query('COMMIT');
 
-      // Fetch updated post
-      const postRes = await client.query(`
-        SELECT
-          p.id,
-          p.content,
-          p.image_url,
-          p.like_count,
-          p.comment_count,
-          p.created_at,
-          u.id as author_id,
-          COALESCE(pr.display_name, u.username, 'Phasebook User') as author_name,
-          u.username as author_username,
-          COALESCE(pr.avatar_url, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar,
-          true as author_verified,
-          u.role as author_role
-        FROM posts p
-        LEFT JOIN users u ON p.user_id = u.id
-        LEFT JOIN profiles pr ON u.id = pr.user_id
-        WHERE p.id = $1;
-      `, [numericPostId]);
-
-      if (postRes.rowCount === 0) {
+      // Fetch updated post using dbGetPosts for consistent adaptive mapping
+      const posts = await dbGetPosts();
+      const updatedPost = posts.find((p) => String(p.id) === String(postId));
+      if (!updatedPost) {
         throw new Error('Post not found in Neon database');
       }
-
-      const p = postRes.rows[0];
-      return {
-        id: String(p.id),
-        author: {
-          id: String(p.author_id || p.user_id),
-          name: p.author_name || 'User',
-          username: p.author_username || 'user',
-          avatar: p.author_avatar || CURRENT_USER.avatar,
-        },
-        content: p.content,
-        image: p.image_url || undefined,
-        imageUrl: p.image_url || undefined,
-        likes: p.like_count,
-        userLiked,
-        shares: 0,
-        timestamp: formatPostTime(p.created_at),
-        comments: [],
-      };
+      return updatedPost;
     } catch (err: any) {
       await client.query('ROLLBACK');
       console.error('[Neon Database] Like transaction failed:', err);
@@ -815,14 +934,21 @@ export async function dbAddComment(postId: string, text: string): Promise<{ post
         ? Number(CURRENT_USER.id)
         : 1;
 
-      // Insert comment
+      const cols = await getTableColumns(client);
+      const postsCols = cols.posts;
+      const commentsCols = cols.comments;
+
+      // Insert comment adaptively (content or text)
+      const textCol = commentsCols.has('content') ? 'content' : 'text';
       const commentRes = await client.query(`
-        INSERT INTO comments (post_id, user_id, content, created_at)
+        INSERT INTO comments (post_id, user_id, ${textCol}, created_at)
         VALUES ($1, $2, $3, NOW())
         RETURNING *;
-      `, [numericPostId, userId, text.trim()]);
+      `, [numericPostId || postId, userId, text.trim()]);
 
-      await client.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id = $1;', [numericPostId]);
+      if (postsCols.has('comment_count')) {
+        await client.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id::text = $1::text;', [postId]);
+      }
 
       await client.query('COMMIT');
 
@@ -830,7 +956,7 @@ export async function dbAddComment(postId: string, text: string): Promise<{ post
       const comment: PhasebookComment = {
         id: String(insertedComment.id),
         author: CURRENT_USER,
-        text: insertedComment.content,
+        text: insertedComment[textCol] || insertedComment.content || insertedComment.text || text.trim(),
         timestamp: 'Just now',
         likes: 0,
       };
@@ -938,35 +1064,18 @@ export async function dbGetIncidents(limit = 50): Promise<IncidentRecord[]> {
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
+      const cols = await getTableColumns(client);
+      const incCols = cols.incidents;
+      const selectCols = buildIncidentSelectCols(incCols);
+
       const res = await client.query(
-        `SELECT
-          id,
-          title,
-          service,
-          severity,
-          status,
-          deployment_id,
-          root_cause,
-          started_at,
-          resolved_at
+        `SELECT ${selectCols}
         FROM incidents
         ORDER BY started_at DESC
         LIMIT $1;`,
         [limit]
       );
-      return res.rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        service: r.service,
-        severity: r.severity,
-        status: r.status,
-        deployment_id: r.deployment_id,
-        root_cause: r.root_cause,
-        failure_type: null,
-        details: r.root_cause,
-        started_at: r.started_at ? new Date(r.started_at).toISOString() : new Date().toISOString(),
-        resolved_at: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
-      }));
+      return res.rows.map((r) => mapIncidentRow(r));
     } catch (err: any) {
       console.error('[Neon Database] Error reading incidents:', err);
       throw new Error(`Neon Incidents Query Failed: ${err.message}`);
@@ -987,33 +1096,22 @@ export async function dbGetIncident(id: string | number): Promise<IncidentRecord
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
+      const cols = await getTableColumns(client);
+      const incCols = cols.incidents;
+      const selectCols = buildIncidentSelectCols(incCols);
+
       const isNumeric = typeof id === 'number' || /^\d+$/.test(String(id));
       const res = isNumeric
         ? await client.query(
-            `SELECT id, title, service, severity, status, deployment_id, root_cause, started_at, resolved_at
-             FROM incidents WHERE id = $1;`,
-            [Number(id)]
+            `SELECT ${selectCols} FROM incidents WHERE id::text = $1::text;`,
+            [String(id)]
           )
         : await client.query(
-            `SELECT id, title, service, severity, status, deployment_id, root_cause, started_at, resolved_at
-             FROM incidents WHERE title ILIKE '%' || $1 || '%' ORDER BY id DESC LIMIT 1;`,
+            `SELECT ${selectCols} FROM incidents WHERE title ILIKE '%' || $1 || '%' ORDER BY id DESC LIMIT 1;`,
             [String(id)]
           );
       if (res.rows.length === 0) return null;
-      const r = res.rows[0];
-      return {
-        id: r.id,
-        title: r.title,
-        service: r.service,
-        severity: r.severity,
-        status: r.status,
-        deployment_id: r.deployment_id,
-        root_cause: r.root_cause,
-        failure_type: null,
-        details: r.root_cause,
-        started_at: r.started_at ? new Date(r.started_at).toISOString() : new Date().toISOString(),
-        resolved_at: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
-      };
+      return mapIncidentRow(res.rows[0]);
     } catch (err: any) {
       console.error(`[Neon Database] Error reading incident ${id}:`, err);
       throw new Error(`Neon Incident Query Failed: ${err.message}`);
@@ -1106,25 +1204,56 @@ export async function dbCreateIncident(incident: {
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
+      const cols = await getTableColumns(client);
+      const incCols = cols.incidents;
+
+      const insCols: string[] = ['title', 'service', 'severity', 'status'];
+      const insVals: any[] = [title, service, severity, status];
+      const valPlaceholders: string[] = ['$1', '$2', '$3', '$4'];
+      let paramIdx = 5;
+
+      if (incident.id && incCols.has('id')) {
+        insCols.push('id');
+        insVals.push(incident.id);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (incCols.has('deployment_id') && incident.deployment_id !== undefined && incident.deployment_id !== null) {
+        insCols.push('deployment_id');
+        insVals.push(incident.deployment_id);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (incCols.has('root_cause')) {
+        insCols.push('root_cause');
+        insVals.push(rootCause);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (incCols.has('details')) {
+        insCols.push('details');
+        insVals.push(incident.details || rootCause);
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      if (incCols.has('failure_type')) {
+        insCols.push('failure_type');
+        insVals.push(incident.failure_type || 'unspecified');
+        valPlaceholders.push(`$${paramIdx++}`);
+      }
+
+      insCols.push('started_at');
+      insVals.push(startedAt);
+      valPlaceholders.push(`$${paramIdx++}`);
+
       const res = await client.query(
-        `INSERT INTO incidents (title, service, severity, status, root_cause, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, title, service, severity, status, deployment_id, root_cause, started_at, resolved_at;`,
-        [title, service, severity, status, rootCause, startedAt]
+        `INSERT INTO incidents (${insCols.join(', ')})
+         VALUES (${valPlaceholders.join(', ')})
+         RETURNING *;`,
+        insVals
       );
       const r = res.rows[0];
-      const createdRecord: IncidentRecord = {
-        id: r.id,
-        title: r.title,
-        service: r.service,
-        severity: r.severity,
-        status: r.status,
-        deployment_id: r.deployment_id,
-        root_cause: r.root_cause,
-        details: r.root_cause,
-        started_at: r.started_at ? new Date(r.started_at).toISOString() : new Date().toISOString(),
-        resolved_at: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
-      };
+      const createdRecord = mapIncidentRow(r);
       inMemoryIncidents.unshift(createdRecord);
       return createdRecord;
     } catch (err: any) {
@@ -1255,29 +1384,37 @@ export async function dbUpdateIncidentStatus(
         }
       }
 
-      if (numericId !== null) {
+      if (numericId !== null || incidentId) {
+        const cols = await getTableColumns(client);
+        const incCols = cols.incidents;
+
+        let detailsUpdate = '';
+        const updateParams: any[] = [String(numericId ?? incidentId), status.toLowerCase(), resolvedAt];
+        let pIdx = 4;
+
+        if (details) {
+          if (incCols.has('root_cause')) {
+            detailsUpdate += `, root_cause = $${pIdx++}`;
+            updateParams.push(details);
+          }
+          if (incCols.has('details')) {
+            detailsUpdate += `, details = $${pIdx++}`;
+            updateParams.push(details);
+          }
+        }
+
         const res = await client.query(
           `UPDATE incidents
            SET status = $2,
                resolved_at = CASE WHEN $3::text IS NOT NULL THEN $3::timestamp ELSE resolved_at END
-           WHERE id = $1
-           RETURNING id, title, service, severity, status, deployment_id, root_cause, started_at, resolved_at;`,
-          [numericId, status.toLowerCase(), resolvedAt]
+               ${detailsUpdate}
+           WHERE id::text = $1::text
+           RETURNING *;`,
+          updateParams
         );
         if (res.rows.length > 0) {
           const r = res.rows[0];
-          const updated: IncidentRecord = {
-            id: r.id,
-            title: r.title,
-            service: r.service,
-            severity: r.severity,
-            status: r.status,
-            deployment_id: r.deployment_id,
-            root_cause: r.root_cause,
-            details: r.root_cause,
-            started_at: r.started_at ? new Date(r.started_at).toISOString() : new Date().toISOString(),
-            resolved_at: r.resolved_at ? new Date(r.resolved_at).toISOString() : null,
-          };
+          const updated = mapIncidentRow(r);
           return updated;
         }
       }

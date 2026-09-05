@@ -2,5 +2,7 @@
   "name": "Phasebook",
   "description": "Modern Facebook-style social network application with dedicated SRE admin control panel, failure injection, PagerDuty integration, and autonomous SRE-Zero agent.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
