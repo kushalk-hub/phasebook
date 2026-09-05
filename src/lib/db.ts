@@ -518,13 +518,19 @@ async function getTableColumns(client: pg.PoolClient): Promise<Record<string, Se
     const res = await client.query(`
       SELECT table_name, column_name 
       FROM information_schema.columns 
-      WHERE table_schema = 'public' AND table_name IN ('posts', 'incidents', 'incident_events', 'comments');
+      WHERE table_schema = 'public' AND table_name IN ('posts', 'incidents', 'incident_events', 'comments', 'users', 'profiles', 'notifications', 'likes', 'friendships', 'deployments');
     `);
     const cols: Record<string, Set<string>> = {
       posts: new Set(),
       incidents: new Set(),
       incident_events: new Set(),
       comments: new Set(),
+      users: new Set(),
+      profiles: new Set(),
+      notifications: new Set(),
+      likes: new Set(),
+      friendships: new Set(),
+      deployments: new Set(),
     };
     for (const r of res.rows) {
       if (!cols[r.table_name]) cols[r.table_name] = new Set();
@@ -535,10 +541,16 @@ async function getTableColumns(client: pg.PoolClient): Promise<Record<string, Se
   } catch (err) {
     console.warn('[Neon Database] Could not query information_schema.columns, using default schema fallback:', err);
     return {
+      users: new Set(['id', 'name', 'username', 'avatar', 'verified', 'role', 'created_at']),
+      profiles: new Set(['user_id', 'bio', 'work', 'education', 'lives_in', 'joined_date', 'cover_image']),
       posts: new Set(['id', 'user_id', 'content', 'image', 'likes_count', 'shares_count', 'created_at']),
-      incidents: new Set(['id', 'title', 'service', 'severity', 'status', 'failure_type', 'details', 'started_at', 'resolved_at']),
-      incident_events: new Set(['id', 'incident_id', 'event_type', 'description', 'actor', 'created_at']),
       comments: new Set(['id', 'post_id', 'user_id', 'text', 'likes_count', 'created_at']),
+      likes: new Set(['id', 'post_id', 'user_id', 'created_at']),
+      notifications: new Set(['id', 'user_id', 'actor_id', 'action', 'target', 'read', 'created_at']),
+      deployments: new Set(['id', 'version', 'commit_sha', 'commit_message', 'commit_author', 'status', 'health_result', 'deployed_at', 'deployed_by', 'is_active']),
+      incidents: new Set(['id', 'title', 'service', 'severity', 'status', 'failure_type', 'details', 'started_at', 'resolved_at']),
+      incident_events: new Set(['id', 'incident_id', 'event_type', 'message', 'details', 'created_at']),
+      friendships: new Set(['id', 'user_id', 'friend_id', 'status', 'created_at']),
     };
   }
 }
@@ -596,78 +608,125 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
-      const currentUserId = typeof CURRENT_USER.id === 'number' || /^\d+$/.test(String(CURRENT_USER.id))
-        ? Number(CURRENT_USER.id)
-        : null;
-
       const cols = await getTableColumns(client);
-      const postsCols = cols.posts;
-      const commentsCols = cols.comments;
+      const postsCols = cols.posts || new Set();
+      const commentsCols = cols.comments || new Set();
+      const usersCols = cols.users || new Set();
+      const profilesCols = cols.profiles || new Set();
 
-      // Adaptively select image column (image_url or image)
-      const imgCol = postsCols.has('image_url')
-        ? 'p.image_url'
-        : postsCols.has('image')
+      // Adaptively select image column (image or image_url)
+      // In scripts/migrate.ts, posts table has 'image'
+      const imgCol = postsCols.has('image')
         ? 'p.image as image_url'
+        : postsCols.has('image_url')
+        ? 'p.image_url'
         : 'NULL::text as image_url';
 
-      // Adaptively select likes column (like_count or likes_count)
-      const likesCol = postsCols.has('like_count')
-        ? 'p.like_count'
-        : postsCols.has('likes_count')
+      // Adaptively select likes column (likes_count or like_count)
+      // In scripts/migrate.ts, posts table has 'likes_count'
+      const likesCol = postsCols.has('likes_count')
         ? 'p.likes_count as like_count'
+        : postsCols.has('like_count')
+        ? 'p.like_count'
         : '0 as like_count';
+
+      // Adaptively select shares column (shares_count)
+      // In scripts/migrate.ts, posts table has 'shares_count'
+      const sharesCol = postsCols.has('shares_count')
+        ? 'COALESCE(p.shares_count, 0) as shares_count'
+        : postsCols.has('shares')
+        ? 'COALESCE(p.shares, 0) as shares_count'
+        : '0 as shares_count';
 
       // Adaptively select comments count (comment_count or computed)
       const commentsCol = postsCols.has('comment_count')
         ? 'p.comment_count'
-        : '0 as comment_count';
+        : '(SELECT COUNT(*)::integer FROM comments cm WHERE cm.post_id::text = p.id::text) as comment_count';
 
-      // 1. Fetch Posts with Author profile info matching either Neon schema
+      // Adaptively select author name (name or display_name or username)
+      // In scripts/migrate.ts, users table has 'name' and 'username'
+      const nameCol = usersCols.has('name')
+        ? 'u.name'
+        : usersCols.has('display_name')
+        ? 'u.display_name'
+        : profilesCols.has('display_name')
+        ? 'pr.display_name'
+        : 'u.username';
+
+      // Adaptively select author avatar (avatar or avatar_url)
+      // In scripts/migrate.ts, users table has 'avatar'
+      const avatarCol = usersCols.has('avatar')
+        ? 'u.avatar'
+        : usersCols.has('avatar_url')
+        ? 'u.avatar_url'
+        : profilesCols.has('avatar_url')
+        ? 'pr.avatar_url'
+        : 'NULL::text';
+
+      const verifiedCol = usersCols.has('verified')
+        ? 'COALESCE(u.verified, true) as author_verified'
+        : 'true as author_verified';
+
+      const roleCol = usersCols.has('role')
+        ? 'u.role as author_role'
+        : 'NULL::text as author_role';
+
+      const shouldJoinProfiles = profilesCols.has('display_name') || profilesCols.has('avatar_url');
+      const profileJoin = shouldJoinProfiles ? 'LEFT JOIN profiles pr ON u.id::text = pr.user_id::text' : '';
+
+      // 1. Fetch Posts with Author user info matching actual Neon schema
       const postsRes = await client.query(`
         SELECT
           p.id,
           p.content,
           ${imgCol},
           ${likesCol},
+          ${sharesCol},
           ${commentsCol},
           p.created_at,
           u.id as author_id,
-          COALESCE(pr.display_name, u.username, 'Phasebook User') as author_name,
+          COALESCE(${nameCol}, u.username, 'Phasebook User') as author_name,
           u.username as author_username,
-          COALESCE(pr.avatar_url, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar,
-          true as author_verified,
-          u.role as author_role,
-          CASE WHEN $1::integer IS NOT NULL THEN
-            EXISTS(SELECT 1 FROM likes l WHERE l.post_id::text = p.id::text AND l.user_id::text = $1::text)
-          ELSE false END as user_liked
+          COALESCE(${avatarCol}, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar,
+          ${verifiedCol},
+          ${roleCol},
+          EXISTS(SELECT 1 FROM likes l WHERE l.post_id::text = p.id::text AND l.user_id::text = $1::text) as user_liked
         FROM posts p
         LEFT JOIN users u ON p.user_id::text = u.id::text
-        LEFT JOIN profiles pr ON u.id::text = pr.user_id::text
+        ${profileJoin}
         ORDER BY p.created_at DESC
         LIMIT 50;
-      `, [currentUserId]);
+      `, [String(CURRENT_USER.id)]);
 
-      // Adaptively select comment text column (content or text)
-      const commentTextCol = commentsCols.has('content')
+      // Adaptively select comment text column (text or content)
+      // In scripts/migrate.ts, comments table has 'text'
+      const commentTextCol = commentsCols.has('text')
+        ? 'c.text as text'
+        : commentsCols.has('content')
         ? 'c.content as text'
-        : 'c.text as text';
+        : "'' as text";
 
-      // 2. Fetch Comments for these posts
+      const commentLikesCol = commentsCols.has('likes_count')
+        ? 'COALESCE(c.likes_count, 0) as likes_count'
+        : commentsCols.has('like_count')
+        ? 'COALESCE(c.like_count, 0) as likes_count'
+        : '0 as likes_count';
+
+      // 2. Fetch Comments for these posts matching actual Neon schema
       const commentsRes = await client.query(`
         SELECT
           c.id,
           c.post_id,
           ${commentTextCol},
-          0 as likes_count,
+          ${commentLikesCol},
           c.created_at,
           u.id as author_id,
-          COALESCE(pr.display_name, u.username, 'Phasebook User') as author_name,
+          COALESCE(${nameCol}, u.username, 'Phasebook User') as author_name,
           u.username as author_username,
-          COALESCE(pr.avatar_url, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar
+          COALESCE(${avatarCol}, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as author_avatar
         FROM comments c
         LEFT JOIN users u ON c.user_id::text = u.id::text
-        LEFT JOIN profiles pr ON u.id::text = pr.user_id::text
+        ${profileJoin}
         ORDER BY c.created_at ASC;
       `);
 
@@ -675,11 +734,11 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
       for (const row of commentsRes.rows) {
         const comment: PhasebookComment = {
           id: String(row.id),
-          text: row.text,
-          likes: row.likes_count || 0,
+          text: row.text || '',
+          likes: Number(row.likes_count) || 0,
           timestamp: formatPostTime(row.created_at),
           author: {
-            id: String(row.author_id),
+            id: String(row.author_id || 'user'),
             name: row.author_name || 'Phasebook User',
             username: row.author_username || 'user',
             avatar: row.author_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
@@ -692,25 +751,28 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
         commentsByPost[pKey].push(comment);
       }
 
-      const formattedPosts: PhasebookPost[] = postsRes.rows.map((r) => ({
-        id: String(r.id),
-        content: r.content,
-        image: r.image_url || undefined,
-        imageUrl: r.image_url || undefined,
-        likes: Number(r.like_count) || 0,
-        userLiked: Boolean(r.user_liked),
-        shares: 0,
-        timestamp: formatPostTime(r.created_at),
-        author: {
-          id: String(r.author_id || CURRENT_USER.id),
-          name: r.author_name || CURRENT_USER.name,
-          username: r.author_username || CURRENT_USER.username,
-          avatar: r.author_avatar || CURRENT_USER.avatar,
-          verified: Boolean(r.author_verified),
-          role: r.author_role || undefined,
-        },
-        comments: commentsByPost[String(r.id)] || [],
-      }));
+      const formattedPosts: PhasebookPost[] = postsRes.rows.map((r) => {
+        const pId = String(r.id);
+        return {
+          id: pId,
+          content: r.content,
+          image: r.image_url || undefined,
+          imageUrl: r.image_url || undefined,
+          likes: Number(r.like_count) || 0,
+          userLiked: Boolean(r.user_liked),
+          shares: Number(r.shares_count) || 0,
+          timestamp: formatPostTime(r.created_at),
+          author: {
+            id: String(r.author_id || CURRENT_USER.id),
+            name: r.author_name || CURRENT_USER.name,
+            username: r.author_username || CURRENT_USER.username,
+            avatar: r.author_avatar || CURRENT_USER.avatar,
+            verified: Boolean(r.author_verified),
+            role: r.author_role || undefined,
+          },
+          comments: commentsByPost[pId] || [],
+        };
+      });
 
       return formattedPosts;
     } catch (err: any) {
@@ -855,14 +917,10 @@ export async function dbLikePost(postId: string): Promise<PhasebookPost> {
     try {
       await client.query('BEGIN');
 
-      const numericPostId = Number(postId);
-      const userId = typeof CURRENT_USER.id === 'number' || /^\d+$/.test(String(CURRENT_USER.id))
-        ? Number(CURRENT_USER.id)
-        : 1;
-
       const cols = await getTableColumns(client);
-      const postsCols = cols.posts;
-      const likeColName = postsCols.has('like_count') ? 'like_count' : 'likes_count';
+      const postsCols = cols.posts || new Set();
+      const likesCols = cols.likes || new Set();
+      const likeColName = postsCols.has('likes_count') ? 'likes_count' : (postsCols.has('like_count') ? 'like_count' : '');
 
       // Check if like exists
       const existingLike = await client.query(
@@ -874,14 +932,25 @@ export async function dbLikePost(postId: string): Promise<PhasebookPost> {
       if (existingLike.rowCount && existingLike.rowCount > 0) {
         // Unlike
         await client.query('DELETE FROM likes WHERE post_id::text = $1::text AND user_id::text = $2::text;', [postId, String(CURRENT_USER.id)]);
-        if (postsCols.has(likeColName)) {
+        if (likeColName && postsCols.has(likeColName)) {
           await client.query(`UPDATE posts SET ${likeColName} = GREATEST(0, ${likeColName} - 1) WHERE id::text = $1::text;`, [postId]);
         }
         userLiked = false;
       } else {
         // Like
-        await client.query('INSERT INTO likes (post_id, user_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING;', [numericPostId || postId, userId]);
-        if (postsCols.has(likeColName)) {
+        const likeId = `like_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        if (likesCols.has('id')) {
+          await client.query(
+            'INSERT INTO likes (id, post_id, user_id, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT DO NOTHING;',
+            [likeId, postId, String(CURRENT_USER.id)]
+          );
+        } else {
+          await client.query(
+            'INSERT INTO likes (post_id, user_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING;',
+            [postId, String(CURRENT_USER.id)]
+          );
+        }
+        if (likeColName && postsCols.has(likeColName)) {
           await client.query(`UPDATE posts SET ${likeColName} = ${likeColName} + 1 WHERE id::text = $1::text;`, [postId]);
         }
         userLiked = true;
@@ -929,22 +998,31 @@ export async function dbAddComment(postId: string, text: string): Promise<{ post
     try {
       await client.query('BEGIN');
 
-      const numericPostId = Number(postId);
-      const userId = typeof CURRENT_USER.id === 'number' || /^\d+$/.test(String(CURRENT_USER.id))
-        ? Number(CURRENT_USER.id)
-        : 1;
-
       const cols = await getTableColumns(client);
-      const postsCols = cols.posts;
-      const commentsCols = cols.comments;
+      const postsCols = cols.posts || new Set();
+      const commentsCols = cols.comments || new Set();
 
-      // Insert comment adaptively (content or text)
-      const textCol = commentsCols.has('content') ? 'content' : 'text';
+      // Insert comment adaptively (text or content)
+      const textCol = commentsCols.has('text') ? 'text' : (commentsCols.has('content') ? 'content' : 'text');
+      const insCols: string[] = ['post_id', 'user_id', textCol];
+      const insVals: any[] = [postId, String(CURRENT_USER.id), text.trim()];
+
+      if (commentsCols.has('id')) {
+        insCols.unshift('id');
+        insVals.unshift(commentId);
+      }
+      if (commentsCols.has('likes_count')) {
+        insCols.push('likes_count');
+        insVals.push(0);
+      }
+
+      const placeholders = insVals.map((_, i) => `$${i + 1}`);
+
       const commentRes = await client.query(`
-        INSERT INTO comments (post_id, user_id, ${textCol}, created_at)
-        VALUES ($1, $2, $3, NOW())
+        INSERT INTO comments (${insCols.join(', ')}, created_at)
+        VALUES (${placeholders.join(', ')}, NOW())
         RETURNING *;
-      `, [numericPostId || postId, userId, text.trim()]);
+      `, insVals);
 
       if (postsCols.has('comment_count')) {
         await client.query('UPDATE posts SET comment_count = comment_count + 1 WHERE id::text = $1::text;', [postId]);
@@ -1003,20 +1081,64 @@ export async function dbGetNotifications(): Promise<PhasebookNotification[]> {
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
+      const cols = await getTableColumns(client);
+      const notifCols = cols.notifications || new Set();
+      const usersCols = cols.users || new Set();
+      const profilesCols = cols.profiles || new Set();
+
+      const actionCol = notifCols.has('action')
+        ? 'n.action'
+        : notifCols.has('type')
+        ? 'n.type as action'
+        : "'NOTIFICATION' as action";
+
+      const targetCol = notifCols.has('target')
+        ? 'n.target'
+        : notifCols.has('content')
+        ? 'n.content as target'
+        : "'' as target";
+
+      const readCol = notifCols.has('read')
+        ? 'n.read'
+        : notifCols.has('is_read')
+        ? 'n.is_read as read'
+        : 'false as read';
+
+      const actorJoinCol = notifCols.has('actor_id') ? 'n.actor_id' : 'n.user_id';
+
+      const nameCol = usersCols.has('name')
+        ? 'u.name'
+        : usersCols.has('display_name')
+        ? 'u.display_name'
+        : profilesCols.has('display_name')
+        ? 'pr.display_name'
+        : 'u.username';
+
+      const avatarCol = usersCols.has('avatar')
+        ? 'u.avatar'
+        : usersCols.has('avatar_url')
+        ? 'u.avatar_url'
+        : profilesCols.has('avatar_url')
+        ? 'pr.avatar_url'
+        : 'NULL::text';
+
+      const shouldJoinProfiles = profilesCols.has('display_name') || profilesCols.has('avatar_url');
+      const profileJoin = shouldJoinProfiles ? 'LEFT JOIN profiles pr ON u.id::text = pr.user_id::text' : '';
+
       const res = await client.query(`
         SELECT
           n.id,
-          n.type as action,
-          n.content as target,
-          n.is_read as read,
+          ${actionCol},
+          ${targetCol},
+          ${readCol},
           n.created_at,
           u.id as actor_id,
-          COALESCE(pr.display_name, u.username, 'Phasebook User') as actor_name,
+          COALESCE(${nameCol}, u.username, 'Phasebook User') as actor_name,
           u.username as actor_username,
-          COALESCE(pr.avatar_url, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as actor_avatar
+          COALESCE(${avatarCol}, 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150') as actor_avatar
         FROM notifications n
-        LEFT JOIN users u ON n.user_id = u.id
-        LEFT JOIN profiles pr ON u.id = pr.user_id
+        LEFT JOIN users u ON ${actorJoinCol}::text = u.id::text
+        ${profileJoin}
         ORDER BY n.created_at DESC
         LIMIT 25;
       `);
@@ -1025,7 +1147,7 @@ export async function dbGetNotifications(): Promise<PhasebookNotification[]> {
         id: String(r.id),
         user: {
           id: String(r.actor_id || 'unknown'),
-          name: r.author_name || 'Phasebook User',
+          name: r.actor_name || 'Phasebook User',
           username: r.actor_username || 'user',
           avatar: r.actor_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
         },
@@ -1149,23 +1271,43 @@ export async function dbGetIncidentEvents(incidentId: string | number): Promise<
         return [];
       }
 
+      const cols = await getTableColumns(client);
+      const evCols = cols.incident_events || new Set();
+
+      const msgCol = evCols.has('message')
+        ? 'message'
+        : evCols.has('description')
+        ? 'description as message'
+        : "'' as message";
+      const descCol = evCols.has('description')
+        ? 'description'
+        : evCols.has('message')
+        ? 'message as description'
+        : "'' as description";
+      const detCol = evCols.has('details') ? 'details' : 'NULL::jsonb as details';
+      const actorCol = evCols.has('actor') ? 'actor' : "COALESCE(details->>'actor', 'SRE-Zero') as actor";
+
       const res = await client.query(
-        `SELECT id, incident_id, event_type, description, actor, created_at
+        `SELECT id, incident_id, event_type, ${msgCol}, ${descCol}, ${actorCol}, ${detCol}, created_at
          FROM incident_events
-         WHERE incident_id = $1
+         WHERE incident_id::text = $1::text
          ORDER BY created_at ASC;`,
-        [numericId]
+        [String(numericId)]
       );
-      return res.rows.map((r) => ({
-        id: r.id,
-        incident_id: r.incident_id,
-        event_type: r.event_type,
-        message: r.description || '',
-        description: r.description || '',
-        actor: r.actor || 'SRE-Zero',
-        details: { actor: r.actor },
-        created_at: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
-      }));
+      return res.rows.map((r) => {
+        const actor = r.actor || (r.details && r.details.actor) || 'SRE-Zero';
+        const msg = r.message || r.description || '';
+        return {
+          id: r.id,
+          incident_id: r.incident_id,
+          event_type: r.event_type,
+          message: msg,
+          description: msg,
+          actor,
+          details: r.details || { actor },
+          created_at: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+        };
+      });
     } catch (err: any) {
       console.error(`[Neon Database] Error reading events for incident ${incidentId}:`, err);
       throw new Error(`Neon Incident Events Query Failed: ${err.message}`);
@@ -1313,21 +1455,57 @@ export async function dbAddIncidentEvent(event: {
       }
 
       if (numericId !== null) {
+        const cols = await getTableColumns(client);
+        const evCols = cols.incident_events || new Set();
+
+        const eventId = event.id || `evt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const insCols: string[] = ['incident_id', 'event_type'];
+        const insVals: any[] = [numericId, event.event_type];
+
+        if (evCols.has('id')) {
+          insCols.unshift('id');
+          insVals.unshift(eventId);
+        }
+        if (evCols.has('message')) {
+          insCols.push('message');
+          insVals.push(desc);
+        }
+        if (evCols.has('description')) {
+          insCols.push('description');
+          insVals.push(desc);
+        }
+        if (evCols.has('actor')) {
+          insCols.push('actor');
+          insVals.push(actor);
+        }
+        if (evCols.has('details')) {
+          insCols.push('details');
+          insVals.push(JSON.stringify(event.details ? { ...event.details, actor } : { actor }));
+        }
+
+        const placeholders = insVals.map((_, i) => `$${i + 1}`);
+        if (evCols.has('created_at')) {
+          insCols.push('created_at');
+          placeholders.push('NOW()');
+        }
+
         const res = await client.query(
-          `INSERT INTO incident_events (incident_id, event_type, description, actor, created_at)
-           VALUES ($1, $2, $3, $4, NOW())
-           RETURNING id, incident_id, event_type, description, actor, created_at;`,
-          [numericId, event.event_type, desc, actor]
+          `INSERT INTO incident_events (${insCols.join(', ')})
+           VALUES (${placeholders.join(', ')})
+           RETURNING *;`,
+          insVals
         );
         const r = res.rows[0];
+        const recordMsg = r.message || r.description || desc;
+        const recordActor = r.actor || (r.details && r.details.actor) || actor;
         const record: IncidentEventRecord = {
           id: r.id,
           incident_id: r.incident_id,
           event_type: r.event_type,
-          message: r.description,
-          description: r.description,
-          actor: r.actor,
-          details: event.details || null,
+          message: recordMsg,
+          description: recordMsg,
+          actor: recordActor,
+          details: r.details || event.details || null,
           created_at: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
         };
         inMemoryIncidentEvents.push(record);
