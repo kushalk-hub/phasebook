@@ -548,7 +548,17 @@ async function getTableColumns(client: pg.PoolClient): Promise<Record<string, Se
       likes: new Set(['id', 'post_id', 'user_id', 'created_at']),
       notifications: new Set(['id', 'user_id', 'actor_id', 'action', 'target', 'read', 'created_at']),
       deployments: new Set(['id', 'version', 'commit_sha', 'commit_message', 'commit_author', 'status', 'health_result', 'deployed_at', 'deployed_by', 'is_active']),
-      incidents: new Set(['id', 'title', 'service', 'severity', 'status', 'failure_type', 'details', 'started_at', 'resolved_at']),
+      incidents: new Set([
+        'id',
+        'title',
+        'service',
+        'severity',
+        'status',
+        'deployment_id',
+        'root_cause',
+        'started_at',
+        'resolved_at'
+      ]),
       incident_events: new Set(['id', 'incident_id', 'event_type', 'message', 'details', 'created_at']),
       friendships: new Set(['id', 'user_id', 'friend_id', 'status', 'created_at']),
     };
@@ -1183,11 +1193,13 @@ export async function dbGetIncidents(limit = 50): Promise<IncidentRecord[]> {
     throw new Error(`Database Error: Failed to query Neon incidents table (connection refused on ${neonConfig.host})`);
   }
 
+  await ensureDatabaseConnected();
+
   if (pool && isNeonConnected) {
     const client = await pool.connect();
     try {
       const cols = await getTableColumns(client);
-      const incCols = cols.incidents;
+      const incCols = cols.incidents || new Set();
       const selectCols = buildIncidentSelectCols(incCols);
 
       const res = await client.query(
