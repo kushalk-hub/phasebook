@@ -10,6 +10,11 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  # Netlify treats every environment-variable value as a secret and greps for
+  # it in the repo and build output. These three values are ordinary defaults
+  # ("main", the public PagerDuty endpoint, "production"), so exclude the keys
+  # from scanning instead of disabling scanning. Real secrets stay scanned.
+  SECRETS_SCAN_OMIT_KEYS = "GITHUB_BRANCH,PAGERDUTY_API_URL,NODE_ENV"
 
 [functions]
   node_bundler = "esbuild"
