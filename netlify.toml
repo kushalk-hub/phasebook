@@ -1,6 +1,9 @@
 # Netlify Configuration for Phasebook Full-Stack Application
 
 [build]
+  # The React/Vite application lives in web/; the repository root hosts the
+  # Python sample that BugLens indexes.
+  base = "web"
   publish = "dist"
   command = "npm run build"
   functions = "netlify/functions"

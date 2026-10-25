@@ -1,0 +1,10 @@
+[project]
+name = "phasebook-core"
+version = "0.1.0"
+description = "Indexable Python domain core for the Phasebook BugLens sample."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
