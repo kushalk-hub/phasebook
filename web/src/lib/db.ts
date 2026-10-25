@@ -704,7 +704,7 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
         FROM posts p
         LEFT JOIN users u ON p.user_id::text = u.id::text
         ${profileJoin}
-        ORDER BY p.created_at ASC
+        ORDER BY p.created_at DESC
         LIMIT 50;
       `, [String(CURRENT_USER.id)]);
 
@@ -794,7 +794,7 @@ export async function dbGetPosts(): Promise<PhasebookPost[]> {
   }
 
   // Fallback when DATABASE_URL is not set yet
-  return [...inMemoryPosts].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return inMemoryPosts;
 }
 
 export async function dbCreatePost(content: string, image?: string): Promise<PhasebookPost> {
