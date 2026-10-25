@@ -134,6 +134,23 @@ def test_repeated_open_after_the_window_creates_a_new_incident(clock) -> None:
     assert len(manager.list_open()) == 2
 
 
+def test_dedup_window_comes_from_settings(clock) -> None:
+    """PHB-007: an incident is reused only inside the configured window."""
+
+    manager = IncidentManager(Settings(incident_dedup_window_seconds=60))
+
+    first = _open(manager, clock=clock)
+    clock.advance(seconds=59)
+    still_deduplicated = _open(manager, clock=clock)
+
+    clock.advance(seconds=2)
+    after_window = _open(manager, clock=clock)
+
+    assert still_deduplicated is first
+    assert after_window is not first
+    assert after_window.id == "inc-0002"
+
+
 def test_deduplication_is_per_service(clock) -> None:
     manager = IncidentManager()
 

@@ -57,6 +57,29 @@ def test_like_comment_and_tip_update_the_post(api: PhasebookAPI) -> None:
     assert post.shares == 1
 
 
+def test_liking_twice_removes_the_like(api: PhasebookAPI) -> None:
+    """PHB-005 end to end: the second tap must un-like."""
+
+    post = api.create_post(actor_id="u-member", content="Toggle me")
+
+    api.like(actor_id="u-member-2", post_id=post.id)
+    assert post.likes == 1
+
+    api.like(actor_id="u-member-2", post_id=post.id)
+
+    assert post.likes == 0
+    assert post.liked_by == set()
+
+
+def test_blank_comment_is_rejected_by_the_api(api: PhasebookAPI) -> None:
+    """PHB-006 end to end: validation happens in the repository."""
+
+    post = api.create_post(actor_id="u-member", content="Comment me")
+
+    with pytest.raises(ValidationError):
+        api.comment(actor_id="u-member-2", post_id=post.id, text="   ")
+
+
 def test_feed_hides_deleted_posts(api: PhasebookAPI) -> None:
     for text in ("one", "two", "three"):
         api.create_post(actor_id="u-member", content=text)

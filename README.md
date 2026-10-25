@@ -56,6 +56,8 @@ See [DEFECT_CATALOG.md](DEFECT_CATALOG.md). Summary:
 - **PHB-001** — deleted posts leak into the feed and pages are one row too large (HIGH).
 - **PHB-002** — operator authorization is inverted (CRITICAL).
 - **PHB-003** — payments ignore idempotency keys and never trip the circuit breaker (HIGH).
+- **PHB-005 / PHB-006 / PHB-007** — local, uncommitted practice bugs: like toggle,
+  comment validation and incident dedup (see the catalogue).
 
 PHB-004 is the live demonstration: it is a regression of a historically solved
 bug, so BugLens' retrieved RCA shortens the investigation. See [DEMO.md](DEMO.md).

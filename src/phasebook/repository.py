@@ -134,18 +134,11 @@ class InMemoryRepository:
     ) -> Comment:
         post = self.get_post(post_id)
         self.get_user(author_id)
-        body = text.strip()
-        if not body:
-            raise ValidationError("Comment text is required")
-        if len(body) > self._settings.max_comment_length:
-            raise ValidationError(
-                f"Comment exceeds {self._settings.max_comment_length} characters"
-            )
         comment = Comment(
             id=f"c{next(self._comment_seq)}",
             post_id=post.id,
             author_id=author_id,
-            text=body,
+            text=text,
             created_at=now or self._clock(),
         )
         post.comments.append(comment)
@@ -154,12 +147,8 @@ class InMemoryRepository:
     def toggle_like(self, *, post_id: str, user_id: str) -> Post:
         post = self.get_post(post_id)
         self.get_user(user_id)
-        if user_id in post.liked_by:
-            post.liked_by.remove(user_id)
-            post.likes = max(0, post.likes - 1)
-        else:
-            post.liked_by.add(user_id)
-            post.likes += 1
+        post.liked_by.add(user_id)
+        post.likes += 1
         return post
 
     def soft_delete_post(self, *, post_id: str, actor_id: str) -> Post:

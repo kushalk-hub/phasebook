@@ -87,9 +87,7 @@ class IncidentManager:
                 continue
             if incident.service is not service or slugify(incident.title) != wanted:
                 continue
-            age = (moment - incident.started_at).total_seconds()
-            if age <= self._settings.incident_dedup_window_seconds:
-                return incident
+            return incident
         return None
 
     def get(self, incident_id: str) -> Incident:

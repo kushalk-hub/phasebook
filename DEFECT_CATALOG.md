@@ -5,6 +5,63 @@
 > fabricated. Where the BugLens corpus has a *genuine* match, link it manually
 > through the investigation report; the sample itself claims none.
 
+## PHB-005 — Liking a post twice keeps adding likes (local, uncommitted)
+
+- **Severity:** MEDIUM
+- **Type:** reaction state / toggle symmetry
+- **Reproduction:**
+  1. Create a post as `u-member`.
+  2. Tap like twice as `u-member-2` (`api.like` / `InMemoryRepository.toggle_like`).
+  3. Read `post.likes` and `post.liked_by`.
+- **Expected:** the second tap removes the reaction; `likes == 0`, `liked_by == set()`.
+- **Actual:** every call adds the user and increments `likes`, so the count only grows.
+- **Files/functions:** `src/phasebook/repository.py::InMemoryRepository.toggle_like`.
+- **Resolution:** branch on `user_id in post.liked_by`; remove and decrement (clamped at
+  zero) when present, otherwise add and increment once.
+- **Historical match:** `PHB-RCA-021`, `PHB-PR-233`, `PHB-REACTION-CONTRACT`
+  (`database/seeds/phasebook_bugs_extra.json`).
+- **Regression tests:** `tests/test_repository.py::test_liking_twice_removes_the_like`,
+  `::test_repeated_likes_from_one_user_count_once`,
+  `::test_unlike_never_makes_the_count_negative`,
+  `tests/test_api.py::test_liking_twice_removes_the_like`.
+
+## PHB-006 — Blank and oversized comments are stored (local, uncommitted)
+
+- **Severity:** MEDIUM
+- **Type:** input validation
+- **Reproduction:**
+  1. Create a post.
+  2. Add a comment whose text is only spaces.
+  3. Add a comment longer than `Settings.max_comment_length`.
+- **Expected:** both raise `ValidationError`; accepted text is trimmed.
+- **Actual:** the body is stored untrimmed and unvalidated, so empty rows reach the
+  timeline and oversized comments are persisted.
+- **Files/functions:** `src/phasebook/repository.py::InMemoryRepository.add_comment`.
+- **Resolution:** `body = text.strip()`; reject empty bodies and bodies longer than
+  `settings.max_comment_length` before constructing the `Comment`.
+- **Historical match:** `PHB-RCA-018`, `PHB-PR-207`, `PHB-COMMENT-RULES`.
+- **Regression tests:** `tests/test_repository.py::test_blank_comment_is_rejected`,
+  `::test_comment_text_is_trimmed`, `::test_oversized_comment_is_rejected`,
+  `::test_comment_at_the_limit_is_accepted`,
+  `tests/test_api.py::test_blank_comment_is_rejected_by_the_api`.
+
+## PHB-007 — Incident deduplication ignores the configured window (local, uncommitted)
+
+- **Severity:** MEDIUM
+- **Type:** alerting / deduplication
+- **Reproduction:**
+  1. Build an `IncidentManager` with a short `incident_dedup_window_seconds` (e.g. 60).
+  2. Open an incident for a service/title, advance the clock past the window, open it again.
+- **Expected:** the second open creates a new incident (`inc-0002`).
+- **Actual:** any unresolved incident with the same service and title is reused forever,
+  so no new PagerDuty page is sent.
+- **Files/functions:** `src/phasebook/incidents.py::IncidentManager.find_recent`.
+- **Resolution:** restore the age check against
+  `settings.incident_dedup_window_seconds`; keep resolved incidents excluded.
+- **Historical match:** `PHB-RCA-031`, `PHB-PR-244`, `PHB-INCIDENT-DEDUP`.
+- **Regression tests:** `tests/test_incidents.py::test_dedup_window_comes_from_settings`,
+  `::test_repeated_open_after_the_window_creates_a_new_incident`.
+
 ## PHB-004 — Feed timeline renders oldest-first (demo regression)
 
 - **Severity:** HIGH
