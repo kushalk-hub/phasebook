@@ -55,22 +55,30 @@ Then submit a bug through `/investigate` with the real failing output, for
 example:
 
 ```text
-Feed pages return limit + 1 posts and soft-deleted posts are still visible.
+New posts are buried at the bottom of my feed
 ```
+
+This is the PHB-004 demo report; it is the text the metrics script uses.
 
 Expected localization:
 
 | Defect | Top finding | Failing regression tests |
 |---|---|---|
+| PHB-004 (demo) | `src/phasebook/feed.py::build_feed` | `tests/test_feed.py`, `tests/test_api.py` |
 | PHB-001 | `src/phasebook/feed.py::build_feed` | `tests/test_feed.py`, `tests/test_api.py` |
 | PHB-002 | `src/phasebook/auth.py::require_operator` | `tests/test_auth.py`, `tests/test_api.py` |
 | PHB-003 | `src/phasebook/payments.py::PaymentGateway.charge` | `tests/test_payments.py`, `tests/test_api.py` |
 
-At `buggy-baseline` the suite fails in all three areas. At `fixed` it passes:
+At `buggy-baseline` the suite fails in three areas; at `fixed` it passes 100%.
+At `demo-bug` the feed-ordering regression fails six tests; at `demo-fixed` the
+suite is green again. See [DEMO.md](DEMO.md) for the historical-context
+walkthrough.
 
 ```bash
 git checkout buggy-baseline && python -m pytest   # failures for PHB-001/002/003
 git checkout fixed && python -m pytest            # all pass
+git checkout demo-bug && python -m pytest         # 6 failures (PHB-004)
+git checkout demo-fixed && python -m pytest       # all pass
 ```
 
 ## Local verification without the full stack

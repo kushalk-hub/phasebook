@@ -45,6 +45,16 @@ def test_feed_orders_newest_first_and_paginates() -> None:
     assert [post.id for post in page] == ["p3", "p2"]
 
 
+def test_timeline_is_rendered_newest_first() -> None:
+    """PHB-004: the feed contract is newest-first."""
+
+    posts = [_post(f"p{index}", index) for index in range(4)]
+
+    page = build_feed(posts, limit=10)
+
+    assert [post.id for post in page] == ["p3", "p2", "p1", "p0"]
+
+
 def test_page_size_is_capped() -> None:
     assert resolve_limit(10_000, settings=type("S", (), {"feed_max_page_size": 50})()) == 50
 

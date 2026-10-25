@@ -5,6 +5,33 @@
 > fabricated. Where the BugLens corpus has a *genuine* match, link it manually
 > through the investigation report; the sample itself claims none.
 
+## PHB-004 — Feed timeline renders oldest-first (demo regression)
+
+- **Severity:** HIGH
+- **Type:** ordering / regression
+- **Reproduction:**
+  1. Open the Phasebook feed (web app) after at least two posts exist.
+  2. Observe that the oldest post is at the top and new posts land at the
+     bottom.
+  3. Locally: `python -m pytest tests/test_feed.py -q`.
+- **Expected:** the timeline is newest-first, so a page starts with the most
+  recent post.
+- **Actual:** `build_feed` sorts by `(created_at, sequence)` without the
+  descending direction, so pages are oldest-first. The web feed query orders by
+  `p.created_at ASC` for the same reason.
+- **Files/functions:** `src/phasebook/feed.py::build_feed`,
+  `web/src/lib/db.ts::dbGetPosts`.
+- **Resolution:** restore descending ordering at the single ordering boundary
+  and order the web feed query by `p.created_at DESC`; keep the
+  newest-first regression test.
+- **Historical match:** this is a regression of `PHB-RCA-014` (see the BugLens
+  seed `database/seeds/phasebook_demo.json`), so the RCA already documents the
+  root cause, the fix and the prevention test.
+- **Regression tests:** `tests/test_feed.py::test_timeline_is_rendered_newest_first`,
+  `tests/test_feed.py::test_feed_orders_newest_first_and_paginates`,
+  `tests/test_feed.py::test_feed_never_exceeds_the_requested_page_size`,
+  `tests/test_api.py::test_feed_respects_the_requested_page_size`.
+
 ## PHB-001 — Deleted posts leak into the feed and pages are too large
 
 - **Severity:** HIGH

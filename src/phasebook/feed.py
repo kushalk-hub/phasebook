@@ -58,7 +58,6 @@ def build_feed(
     ordered = sorted(
         visible,
         key=lambda post: (post.created_at, _sequence(post.id)),
-        reverse=True,
     )
     return ordered[offset : offset + resolved]
 

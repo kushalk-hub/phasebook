@@ -35,24 +35,30 @@ $env:PYTHONPATH = "src"; python -m phasebook
 
 | Tag | Meaning |
 |---|---|
-| `buggy-baseline` | Reproducible defective state |
-| `fixed` | Fixed state used for verification |
+| `buggy-baseline` | Reproducible defective state used for the first three defects |
+| `fixed` | All original defects fixed (`100 passed`) |
+| `demo-bug` | Historical-context demo: feed ordering regression, tests fail |
+| `demo-fixed` | Same tree with the known fix applied (`101 passed`) |
 
 The tags are local to this clone (nothing is pushed by the sample workflow).
 Resolve a pinned revision with:
 
 ```bash
 git rev-parse buggy-baseline
-git rev-parse fixed
+git rev-parse demo-bug
 ```
 
 ## Defects
 
 See [DEFECT_CATALOG.md](DEFECT_CATALOG.md). Summary:
 
+- **PHB-004** — feed timeline renders oldest-first (demo regression, HIGH).
 - **PHB-001** — deleted posts leak into the feed and pages are one row too large (HIGH).
 - **PHB-002** — operator authorization is inverted (CRITICAL).
 - **PHB-003** — payments ignore idempotency keys and never trip the circuit breaker (HIGH).
+
+PHB-004 is the live demonstration: it is a regression of a historically solved
+bug, so BugLens' retrieved RCA shortens the investigation. See [DEMO.md](DEMO.md).
 
 ## Layout
 
@@ -62,6 +68,7 @@ tests/                  pytest regression suite
 web/                    React/Vite application and Netlify/Neon config
 docker-compose.yml      full-stack stack (builds from ./web)
 netlify.toml            Netlify config with base = "web"
+DEMO.md                 historical-context demo script and metrics
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the module map and
