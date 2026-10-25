@@ -1,7 +1,6 @@
 """Payment gateway with idempotency and a circuit breaker.
 
-PHB-003 lives here: the baseline clears the failure counter on every error and
-ignores an idempotency key it has already seen.
+PHB-003 regression coverage lives in ``tests/test_payments.py``.
 """
 
 from __future__ import annotations
@@ -68,6 +67,13 @@ class PaymentGateway:
         key = idempotency_key.strip()
         if not key:
             raise ValidationError("idempotency_key is required")
+
+        cached = self._results.get(key)
+        if cached is not None:
+            # A replayed key never reaches the provider, even while the
+            # breaker is open: the charge already happened.
+            return replace(cached, idempotent_replay=True)
+
         if self.is_open:
             raise CircuitOpen(
                 "Payment circuit is open; the provider is being protected from retries"
@@ -76,9 +82,9 @@ class PaymentGateway:
         try:
             transaction_id = self._provider(user_id, amount_cents)
         except Exception as exc:  # noqa: BLE001 - all provider errors trip the breaker
-            # Deliberate baseline defect: the counter is cleared instead of
-            # incremented, so the breaker never opens.
-            self._failures = 0
+            self._failures += 1
+            if self._failures >= self._settings.payment_failure_threshold:
+                self._opened_at = self._clock()
             raise PaymentUnavailable(
                 f"Payment provider failed for user {user_id}: {exc}"
             ) from exc
@@ -88,7 +94,6 @@ class PaymentGateway:
             amount_cents=amount_cents,
             provider=self._provider_name,
         )
-        # The baseline does not consult this cache before calling the provider.
         self._results[key] = result
         self._failures = 0
         self._opened_at = None

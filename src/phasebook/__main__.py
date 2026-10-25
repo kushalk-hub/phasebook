@@ -26,7 +26,7 @@ def main() -> int:
         print(f"  {step.step_number}. {step.tool_name}: {step.finding}")
 
     recommendation = api.approve_remediation(actor_id=admin)
-    print(f"Remediation: {recommendation.action_type.value} → {recommendation.target_service.value}")
+    print(f"Remediation: {recommendation.action_type.value} -> {recommendation.target_service.value}")
 
     checks = api.verify_recovery(actor_id=admin)
     for check in checks:

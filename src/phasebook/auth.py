@@ -1,7 +1,8 @@
-"""Authorization helpers. PHB-002 lives here.
+"""Authorization helpers.
 
 Administrative actions (failure injection, remediation approval, rollback) are
-gated by :func:`require_operator`. The baseline check is inverted.
+gated by :func:`require_operator`. PHB-002 regression coverage lives in
+``tests/test_auth.py``.
 """
 
 from __future__ import annotations
@@ -13,13 +14,9 @@ _OPERATOR_ROLES = frozenset({Role.ADMIN, Role.OPERATOR})
 
 
 def require_operator(user: User) -> bool:
-    """Allow administrators and SRE operators.
+    """Allow administrators and SRE operators."""
 
-    PHB-002 baseline behaviour: the membership test is inverted, so members
-    pass the gate while operators and administrators are rejected.
-    """
-
-    if user.role in _OPERATOR_ROLES:
+    if user.role not in _OPERATOR_ROLES:
         raise PermissionDenied(f"{user.id} is not allowed to perform this action")
     return True
 

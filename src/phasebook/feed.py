@@ -1,7 +1,8 @@
-"""Feed construction and pagination. PHB-001 lives here.
+"""Feed construction and pagination.
 
-The sample baseline returns one post too many and does not hide soft-deleted
-posts. Both symptoms are covered by ``tests/test_feed.py``.
+Soft-deleted posts are hidden by default and a page never contains more than
+the requested number of rows. PHB-001 regression coverage lives in
+``tests/test_feed.py``.
 """
 
 from __future__ import annotations
@@ -42,22 +43,24 @@ def build_feed(
 ) -> list[Post]:
     """Return one feed page, newest first.
 
-    PHB-001 baseline behaviour:
-      * soft-deleted posts remain visible;
-      * the slice is inclusive of one extra row (``limit + 1``).
+    Soft-deleted posts are skipped unless ``include_deleted`` is true; the
+    slice is capped at the resolved page size.
     """
 
     if offset < 0:
         raise ValidationError("offset must be zero or greater")
     resolved = resolve_limit(limit, settings)
+    visible = (
+        list(posts)
+        if include_deleted
+        else [post for post in posts if not post.deleted]
+    )
     ordered = sorted(
-        posts,
+        visible,
         key=lambda post: (post.created_at, _sequence(post.id)),
         reverse=True,
     )
-    # Deliberate baseline defect: deleted posts are not filtered and the page
-    # is one row too large.
-    return ordered[offset : offset + resolved + 1]
+    return ordered[offset : offset + resolved]
 
 
 def build_viewer_page(
